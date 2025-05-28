@@ -4,7 +4,12 @@ from trl import SFTConfig, SFTTrainer, DataCollatorForCompletionOnlyLM
 
 # --- 0. Configuration ---
 MODEL_NAME = "facebook/opt-350m"
-RESPONSE_TEMPLATE_STR = "[START_RESPONSE]"
+# This is the full marker string used in your formatted text
+FULL_RESPONSE_MARKER = "[START_RESPONSE]"
+# This is the string whose isolated tokenization should match the
+# beginning of the response part IN THE FULL TOKENIZED INPUT.
+# Based on your output, "START_RESPONSE]" should work.
+COLLATOR_RESPONSE_TEMPLATE_STR = "START_RESPONSE]"
 
 # --- 1. Load Tokenizer ---
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -20,7 +25,8 @@ raw_data = [
         "resolved_query_tag": "[RESOLVED_QUERY']",
         "completion": "Karan Taneja is an AI researcher focusing on LLMs."
     },
-    {
+    # ... (other data entries)
+     {
         "prompt": "[COURSE] History [CHAT] User: Tell me about Napoleon Assistant: Sure! [QUERY] When was he born...",
         "resolved_query_tag": "[RESOLVED_QUERY']",
         "completion": "Napoleon Bonaparte was born on August 15, 1769."
@@ -34,43 +40,41 @@ raw_data = [
 
 def format_example(example):
     full_prompt = f"{example['prompt']}{example['resolved_query_tag']}"
-    return f"{full_prompt}{RESPONSE_TEMPLATE_STR}{example['completion']}"
+    # Use the FULL_RESPONSE_MARKER in the text data fed to the model
+    return f"{full_prompt}{FULL_RESPONSE_MARKER}{example['completion']}"
 
 processed_texts = [format_example(example) for example in raw_data]
-train_dataset_dict = {"text": processed_texts} # Your dataset has a "text" column
+train_dataset_dict = {"text": processed_texts}
 train_dataset = Dataset.from_dict(train_dataset_dict)
 
 print("\nSample formatted training text:")
-print(train_dataset[0]['text'])
+print(train_dataset[0]['text']) # This will show "[START_RESPONSE]"
 
 # --- 3. Initialize Data Collator ---
+# Use the COLLATOR_RESPONSE_TEMPLATE_STR for the collator
 data_collator = DataCollatorForCompletionOnlyLM(
-    response_template=RESPONSE_TEMPLATE_STR,
+    response_template=COLLATOR_RESPONSE_TEMPLATE_STR, # MODIFIED HERE
     tokenizer=tokenizer
 )
-print(f"\nUsing DataCollatorForCompletionOnlyLM with response_template: '{RESPONSE_TEMPLATE_STR}'")
+print(f"\nUsing DataCollatorForCompletionOnlyLM with response_template: '{COLLATOR_RESPONSE_TEMPLATE_STR}'")
 
 # --- 4. SFTTrainer Configuration ---
 training_args = SFTConfig(
     output_dir="/tmp/sft_resolved_query_example",
     max_seq_length=128,
     per_device_train_batch_size=1,
-    max_steps=20,
+    max_steps=20, # Increase for actual training
     logging_steps=1,
     report_to=[],
-    dataset_num_proc=None, # Explicitly setting for some SFTConfig versions
+    dataset_num_proc=None,
 )
 
 # --- 5. Initialize SFTTrainer ---
-# MODIFICATION: Removed 'dataset_text_field'
-# Assuming the trainer will default to the 'text' column in your train_dataset
 trainer = SFTTrainer(
-    MODEL_NAME,  # Model identifier as the first positional argument
+    MODEL_NAME,
     args=training_args,
     train_dataset=train_dataset,
     data_collator=data_collator
-    # dataset_text_field="text" # REMOVED THIS LINE
-    # tokenizer=tokenizer, # Kept removed
 )
 print("\nSFTTrainer initialized.")
 
@@ -82,7 +86,7 @@ print("Training finished.")
 # --- 7. Conceptual Verification (simplified) ---
 print("\n--- Conceptual Verification ---")
 sample_idx = 0
-text_sample = train_dataset[sample_idx]['text']
+text_sample = train_dataset[sample_idx]['text'] # This contains "[START_RESPONSE]"
 tokenized_output = tokenizer(text_sample)
 input_ids = tokenized_output.input_ids
 
@@ -90,20 +94,24 @@ print(f"\nOriginal Text Sample:\n{text_sample}")
 print(f"\nTokenized Input IDs ({len(input_ids)} tokens):\n{input_ids}")
 print(f"Decoded Input IDs:\n{tokenizer.decode(input_ids)}")
 
-response_template_ids = tokenizer.encode(RESPONSE_TEMPLATE_STR, add_special_tokens=False)
-print(f"\nTokenized Response Template '{RESPONSE_TEMPLATE_STR}':\n{response_template_ids}")
+# For verification, use the same template string as the collator
+response_template_ids_for_verification = tokenizer.encode(COLLATOR_RESPONSE_TEMPLATE_STR, add_special_tokens=False)
+print(f"\nTokenized Response Template for Collator ('{COLLATOR_RESPONSE_TEMPLATE_STR}'):\n{response_template_ids_for_verification}")
 
 labels = list(input_ids)
 found_template = False
-for i in range(len(labels) - len(response_template_ids) + 1):
-    if labels[i:i+len(response_template_ids)] == response_template_ids:
+# Search for the collator's template token sequence
+for i in range(len(labels) - len(response_template_ids_for_verification) + 1):
+    if labels[i:i+len(response_template_ids_for_verification)] == response_template_ids_for_verification:
+        # Mask everything *before* this found template
         for j in range(i):
             labels[j] = -100
         found_template = True
+        print(f"Found response template at index {i}.")
         break
 
 if not found_template:
-    print("WARNING: Response template not found in the sample.")
+    print(f"WARNING: Response template '{COLLATOR_RESPONSE_TEMPLATE_STR}' not found in the sample for verification.")
 
 print(f"\nConceptual Labels for this sample (before padding/truncation in a batch):\n{labels}")
 print("\nTokens that will contribute to loss (decoded from labels where label != -100):")
@@ -111,4 +119,4 @@ predicted_tokens = [tok_id for tok_id in labels if tok_id != -100]
 if predicted_tokens:
     print(tokenizer.decode(predicted_tokens))
 else:
-    print("No tokens marked for prediction.")
+    print("No tokens marked for prediction (all labels are -100 or template not found).")
